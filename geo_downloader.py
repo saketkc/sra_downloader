@@ -2,18 +2,17 @@
 """Script for automated downloading of
 raw data from GEO database
 Example:
-    python geo_downloader.py --dfile dataset.md [From Methbase-tracker]
     python geo_downloader.py
 """
 import argparse
 from bs4 import BeautifulSoup
-import csv
 from ftplib import FTP
 import futures
 import hashlib
 import json
 import math
 import os
+import requests
 import sys
 import tempfile
 import yaml
@@ -22,23 +21,29 @@ import yaml
 __GEO_LINK_NAME__ = 'GSE Link'
 __NCBI_FTP__ = 'ftp-trace.ncbi.nlm.nih.gov'
 __GEO_LINK_COLUMN__ = 3
+__EMAIL__ = ''
+
 """
 Checks to run on NCBI output for a Geo project
 Example: Ensure the results were generated from a Methylation experiment
 {'gdsType': 'Methylation profiling by high throughput sequencing'}"""
+
 __DATA_CHECKS__ = {}
 # Absolute path where files are downloaded
 __ROOT_DOWNLOAD_LOCATION__ = None
 __RETMAX__ = 10**9
-
+__NCBI_BASE_URL__ = 'http://eutils.ncbi.nlm.nih.gov/entrez/eutils/%s.fcgi'
 
 class Entrez(object):
 
     def __init__(self):
         pass
 
-    def esearch(self):
-        pass
+    def esearch(self, db=None, term=None, retmax=__RETMAX__, retstart=0):
+        payload = {'db':db, 'term':term, 'retmax':retmax, 'retstart':retstart, 'retmode':'json'}
+        url = (__NCBI_BASE_URL__)%'esearch'
+        request = requests.get(url, params=payload)
+        print request.json()
 
     def summary(self):
         pass
@@ -48,7 +53,7 @@ def _set_root_download_path(path):
     global __ROOT_DOWNLOAD_LOCATION__
     __ROOT_DOWNLOAD_LOCATION__ = path
 class GEOQuery:
-    def __init__(self, search_term=None, email="all@smithlabresearch.org"):
+    def __init__(self, search_term=None, email=__EMAIL__):
         Entrez.email = email
         # Geo Datasets database
         self.database = 'gds'
@@ -64,11 +69,12 @@ class GEOQuery:
         Submit Query to GEODatasets
         Returns records
         """
-        query = Entrez.esearch(db=self.database, term=self.search_term, retmax=__RETMAX__, retstart=retstart)
-        record = Entrez.read(query)
-        if self.max_records is None:
-            self.max_records = record['Count']
-        return record
+        entrez = Entrez()
+        query = entrez.esearch(db=self.database, term=self.search_term, retmax=__RETMAX__, retstart=retstart)
+        #record = Entrez.read(query)
+        #if self.max_records is None:
+        #    self.max_records = record['Count']
+        #return record
 
     def get_titles(self, uid_list=None):
         """
@@ -127,83 +133,6 @@ class GEOQuery:
 def stop_err(message):
      sys.stderr.write('ERROR: ' + message + '\n')
      sys.exit(1)
-
-
-class MarkdownParser:
-
-    """
-    This class implements a very raw parser for parsing
-    our markdown fikes. The current format used:
-
-        |Project name|Content|GSE link|paper link|Method|Who|Finished|
-        |:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-
-    The implementation assumes that the first occurence of '|' is a good enough
-    catch to estimate the number of columns, then reads this line as its header
-    and looks for the column number of 'GSE link'. The GEO links are then stored
-    as a {'project_name': 'GEO accession key'}
-    """
-
-    def __init__(self, file_location):
-        self.file_location = file_location
-        assert(os.path.isfile(file_location))
-
-    def is_row_junk(self, row):
-        """
-        Return True if a row has  at least one occurence of the  separator: ':---:'
-        """
-        if len(row) <= 7:
-            return True
-        for element in row:
-            if element == ':---:':
-                return True
-        return False
-
-    def get_geo_column_number(self, header_row):
-        """
-        Returns the column number where the __GEO_LINK_NAME__
-        appears in the header row
-        """
-        for id, element in enumerate(header_row):
-            if element == __GEO_LINK_NAME__:
-                return id
-        return None
-
-    def get_header(self):
-        """
-        Moves the file pointer to next line till it encounters a header column as described in __init__
-        """
-        row = self.reader.next()
-        while len(row) < 9:
-            row = self.reader.next()
-            if len(row) == 0:
-                row = self.reader.next()
-        return row
-
-    def get_geo_links(self):
-        """
-        Returns a dictiornary with keys as the project name
-        and values as the geo links
-        """
-        self.reader = csv.reader(open(self.file_location, 'r'), delimiter='|')
-        header = self.get_header()
-        assert(header is not None)
-        column_number = __GEO_LINK_COLUMN__
-        assert(column_number is not None)
-        geo_links = {}
-        for row in self.reader:
-            if not self.is_row_junk(row):
-                project_name = row[1]
-                geo_link = row[column_number]
-                geo_link = geo_link.split('=')
-                try:
-                    geo_link = geo_link[1]
-                    geo_link = geo_link.replace(')', '')
-                    geo_links[project_name] = geo_link
-                except IndexError:
-                    sys.stderr.write(
-                        'ERROR parsing record for {} \n'.format(project_name))
-        return geo_links
 
 
 def is_already_downloaded(download_to):
@@ -302,7 +231,9 @@ def walkthrough(queue):
         downstream_size = 0
         if os.path.isfile(download_location):
             downstream_size = os.path.getsize(download_location)
-        sys.stdout.write("{0}\t\t{1}\t{2}\t{3}\t{4}\n".format(record['sra'], size(upstream_size), size(downstream_size), record['sra_id'], record['technical_replicate']))
+
+        sys.stdout.write("{0}\t\t{1}\t{2}\t{3}\t{4}\n".format(record['sra'], upstream_size, downstream_size,
+                                                              record['sra_id'], record['technical_replicate']))
 
 
 class DownloadManager(QueryProcessor):
@@ -340,8 +271,8 @@ class DownloadManager(QueryProcessor):
 
     def download_block(self, block):
         percentage = int(math.ceil(100*float(self.downstream_file.tell())/self.upstream_file_size))
-        #sys.stdout.write("\r{0}: [{1}{2}] {3}%".format(self.sra, "#"*percentage, ' '*(100-percentage), percentage))
-        #sys.stdout.flush()
+        sys.stdout.write("\r{0}: [{1}{2}] {3}%".format(self.sra, "#"*percentage, ' '*(100-percentage), percentage))
+        sys.stdout.flush()
         self.downstream_file.write(block)
 
 
@@ -351,10 +282,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Argument parser for downloading GEO files")
     parser.add_argument(
-        '--dfile',
-        type=str,
-        help='Absolute path to markdown dataset file')
-    parser.add_argument(
         '--gid',
         type=str,
         nargs='+',
@@ -362,12 +289,7 @@ if __name__ == '__main__':
     parser.add_argument('--path', type=str, help="Root download location")
     args = parser.parse_args(sys.argv[1:])
     temp_dir = tempfile.mkdtemp()
-    if args.dfile:
-        fs = MarkdownParser(args.dfile)
-        geo_links = fs.get_geo_links()
-        project_names = geo_links.keys()
-        ids_to_download = [geo_links[key] for key in project_names]
-    elif args.gid:
+    if args.gid:
         geoQ = GEOQuery()
         ids_to_download = args.gid
         _set_root_download_path(args.path)
